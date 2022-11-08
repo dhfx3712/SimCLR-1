@@ -17,21 +17,31 @@ def train(net, data_loader, train_optimizer):
     net.train()
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
     for pos_1, pos_2, target in train_bar:
-        pos_1, pos_2 = pos_1.cuda(non_blocking=True), pos_2.cuda(non_blocking=True)
+        #pos_1, pos_2 = pos_1.cuda(non_blocking=True), pos_2.cuda(non_blocking=True)
+        pos_1, pos_2 = pos_1.to(non_blocking=True), pos_2.to(non_blocking=True)
+        print (f'net_input : pos1-{pos_1.shape} ,pos2-{pos_2.shape}')
         feature_1, out_1 = net(pos_1)
         feature_2, out_2 = net(pos_2)
+        print(f'net_out : feature_1-{feature_1.shape},out_1-{out_1.shape} ,feature_2-{feature_2.shape} ,out_2-{out_2.shape}')
         # [2*B, D]
         out = torch.cat([out_1, out_2], dim=0)
+        print (f'net_out_cat : {out.shape}')
         # [2*B, 2*B]
         sim_matrix = torch.exp(torch.mm(out, out.t().contiguous()) / temperature)
-        mask = (torch.ones_like(sim_matrix) - torch.eye(2 * batch_size, device=sim_matrix.device)).bool()
+        print (f'net sim_matrix : {sim_matrix.shape}, {sim_matrix}')
+        mask = (torch.ones_like(sim_matrix) - torch.eye(2 * batch_size, device=sim_matrix.device)).bool() #cat([out_1, out_2], dim=0) 2倍的batch数量
+        print(f'net mask : {mask.shape} , {mask}') #去掉对角线的sim值
         # [2*B, 2*B-1]
+        print(f'net mask_select : {sim_matrix.masked_select(mask)}')
         sim_matrix = sim_matrix.masked_select(mask).view(2 * batch_size, -1)
+        print(f'net sim_matrix_mask : {sim_matrix.shape} , {sim_matrix}')
 
         # compute loss
         pos_sim = torch.exp(torch.sum(out_1 * out_2, dim=-1) / temperature)
+        print (f'net_pos : {pos_sim.shape} ')
         # [2*B]
-        pos_sim = torch.cat([pos_sim, pos_sim], dim=0)
+        pos_sim = torch.cat([pos_sim, pos_sim], dim=0) #pos_sim值在求和中最大，即最相似
+        print (f'net_pos_sim : {pos_sim} , sim_matrix_dim 每个向量与其他向量的相似求和: {sim_matrix.sum(dim=-1)} , log : {- torch.log(pos_sim / sim_matrix.sum(dim=-1))}')
         loss = (- torch.log(pos_sim / sim_matrix.sum(dim=-1))).mean()
         train_optimizer.zero_grad()
         loss.backward()
@@ -51,7 +61,8 @@ def test(net, memory_data_loader, test_data_loader):
     with torch.no_grad():
         # generate feature bank
         for data, _, target in tqdm(memory_data_loader, desc='Feature extracting'):
-            feature, out = net(data.cuda(non_blocking=True))
+            #feature, out = net(data.cuda(non_blocking=True))
+            feature, out = net(data.to(non_blocking=True))
             feature_bank.append(feature)
         # [D, N]
         feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
@@ -60,7 +71,8 @@ def test(net, memory_data_loader, test_data_loader):
         # loop test data to predict the label by weighted knn search
         test_bar = tqdm(test_data_loader)
         for data, _, target in test_bar:
-            data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+            #data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+            data, target = data.to(non_blocking=True), target.to(non_blocking=True)
             feature, out = net(data)
 
             total_num += data.size(0)
@@ -93,8 +105,8 @@ if __name__ == '__main__':
     parser.add_argument('--feature_dim', default=128, type=int, help='Feature dim for latent vector')
     parser.add_argument('--temperature', default=0.5, type=float, help='Temperature used in softmax')
     parser.add_argument('--k', default=200, type=int, help='Top k most similar images used to predict the label')
-    parser.add_argument('--batch_size', default=512, type=int, help='Number of images in each mini-batch')
-    parser.add_argument('--epochs', default=500, type=int, help='Number of sweeps over the dataset to train')
+    parser.add_argument('--batch_size', default=2, type=int, help='Number of images in each mini-batch')
+    parser.add_argument('--epochs', default=5, type=int, help='Number of sweeps over the dataset to train')
 
     # args parse
     args = parser.parse_args()
@@ -103,16 +115,18 @@ if __name__ == '__main__':
 
     # data prepare
     train_data = utils.CIFAR10Pair(root='data', train=True, transform=utils.train_transform, download=True)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True,
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True,
                               drop_last=True)
     memory_data = utils.CIFAR10Pair(root='data', train=True, transform=utils.test_transform, download=True)
-    memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
+    memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
     test_data = utils.CIFAR10Pair(root='data', train=False, transform=utils.test_transform, download=True)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
     # model setup and optimizer config
-    model = Model(feature_dim).cuda()
-    flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(),))
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model = Model(feature_dim).to(device)
+    #flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(),))
+    flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32),))
     flops, params = clever_format([flops, params])
     print('# Model Params: {} FLOPs: {}'.format(params, flops))
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
@@ -136,3 +150,9 @@ if __name__ == '__main__':
         if test_acc_1 > best_acc:
             best_acc = test_acc_1
             torch.save(model.state_dict(), 'results/{}_model.pth'.format(save_name_pre))
+
+'''
+batch 调小
+python main.py --batch_size 64 --epochs 10
+
+'''

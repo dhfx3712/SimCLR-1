@@ -1,0 +1,9 @@
+*.pth
+*.gz
+*.log
+*.out
+
+__pycache__
+data/*
+results/*
+
